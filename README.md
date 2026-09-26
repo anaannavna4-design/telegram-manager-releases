@@ -2,11 +2,25 @@
 
 Official downloads and release files for **Telegram Manager for Windows**.
 
+## Current version
+
+**Telegram Manager 2.5.1**
+
+### What's new in 2.5.1
+
+- Up to 10 independent channel groups.
+- Separate **Remove channels** workflow.
+- Each Telegram account can use its own selected channel group for unsubscribe.
+- Multiple selected accounts can unsubscribe in parallel.
+- Per-account progress, errors, status and FloodWait handling.
+- Unsubscribe tasks are stored locally and can be resumed after restart.
+- Russian and English interface.
+
 ## Download
 
-The latest public installer will be available in the **Releases** section of this repository.
+Public customer builds are published in the **Releases** section of this repository.
 
-Once the first production release is published, the permanent latest-download link will be:
+Permanent latest-download link:
 
 `https://github.com/anaannavna4-design/telegram-manager-releases/releases/latest/download/TelegramManager-Setup.exe`
 
@@ -29,9 +43,13 @@ A license may be limited to a specific number of devices depending on the purcha
 New versions are published through GitHub Releases.  
 The permanent latest-download link above can stay the same between versions.
 
+Before important upgrades, creating a backup is recommended.
+
 ## Security
 
-For each public release, a SHA-256 checksum file may be provided so that the installer can be verified after download.
+For each public release, a SHA-256 checksum file is provided so that the installer can be verified after download.
+
+Do not share Telegram session files, API credentials, login codes or 2FA passwords.
 
 ## Disclaimer
 
