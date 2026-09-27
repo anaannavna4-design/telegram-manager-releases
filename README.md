@@ -4,17 +4,17 @@ Official downloads and release files for **Telegram Manager for Windows**.
 
 ## Current version
 
-**Telegram Manager 2.5.1**
+**Telegram Manager 2.5.2**
 
-### What's new in 2.5.1
+### What's new in 2.5.2
 
-- Up to 10 independent channel groups.
-- Separate **Remove channels** workflow.
-- Each Telegram account can use its own selected channel group for unsubscribe.
-- Multiple selected accounts can unsubscribe in parallel.
-- Per-account progress, errors, status and FloodWait handling.
-- Unsubscribe tasks are stored locally and can be resumed after restart.
-- Russian and English interface.
+- Fixed a bug where channel unsubscribe could hang indefinitely on one Telegram channel.
+- Added a 45-second timeout for unsubscribe Telegram requests.
+- Added one automatic retry after a timeout.
+- If the retry also times out, the channel is recorded as an error and processing continues with the next channel.
+- Stopping an unsubscribe task can now interrupt a stuck Telegram request.
+- Existing unsubscribe progress is preserved and can be resumed after restart.
+- Parallel unsubscribe from multiple accounts and independent channel groups from 2.5.1 are retained.
 
 ## Download
 
