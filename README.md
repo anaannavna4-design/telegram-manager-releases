@@ -4,17 +4,22 @@ Official downloads and release files for **Telegram Manager for Windows**.
 
 ## Current version
 
-**Telegram Manager 2.5.2**
+**Telegram Manager 2.5.4**
 
-### What's new in 2.5.2
+### What's new in 2.5.4
 
-- Fixed a bug where channel unsubscribe could hang indefinitely on one Telegram channel.
-- Added a 45-second timeout for unsubscribe Telegram requests.
-- Added one automatic retry after a timeout.
-- If the retry also times out, the channel is recorded as an error and processing continues with the next channel.
-- Stopping an unsubscribe task can now interrupt a stuck Telegram request.
-- Existing unsubscribe progress is preserved and can be resumed after restart.
-- Parallel unsubscribe from multiple accounts and independent channel groups from 2.5.1 are retained.
+- Fixed subscription queue logic for channels that already have a pending join request.
+- Channels in **Waiting for approval** are no longer retried after restart.
+- The **Remaining** counter now excludes both confirmed subscriptions and pending join requests.
+- Join and leave operations can now run at the same time on different Telegram accounts inside one application instance.
+- The same Telegram account cannot be used for joining and leaving at the same time, preventing session conflicts.
+- Existing accounts, sessions, channel groups and saved progress are preserved.
+
+### Also included from 2.5.3
+
+- Join requests that require administrator approval are tracked separately instead of being counted as errors.
+- Improved account-specific logging.
+- Improved FloodWait visibility and persistence.
 
 ## Download
 
