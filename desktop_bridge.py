@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from app_paths import runtime_dir
 from config import PERSISTENT_QUEUE_LIMIT
 from queue_store import PersistentQueue, row_to_item
 
@@ -59,11 +62,46 @@ class DesktopBridge:
         self.queue = _queue()
         # Only the engine constructs DesktopBridge, so restart recovery belongs here.
         self.queue.recover_after_restart()
+        self._migrate_legacy_json_queue()
         # Kept only for API compatibility. A commercial build must never wipe
         # the queue just because the engine starts.
         if clear_queue:
             self.clear()
 
+    def _migrate_legacy_json_queue(self) -> None:
+        """Import desktop_queue.json once when upgrading from 1.1.x."""
+        legacy = runtime_dir() / "desktop_queue.json"
+        migrated = runtime_dir() / "desktop_queue.migrated.json"
+        if not legacy.exists() or migrated.exists():
+            return
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                return
+            imported = 0
+            for row in data:
+                if not isinstance(row, dict) or not row.get("key"):
+                    continue
+                item = SimpleNamespace(
+                    key=str(row.get("key") or ""),
+                    account=str(row.get("account") or ""),
+                    chat_id=int(row.get("chat_id") or 0),
+                    message_id=int(row.get("message_id") or 0),
+                    chat_title=str(row.get("chat_title") or ""),
+                    post_text=str(row.get("post_text") or ""),
+                    comment=str(row.get("comment") or ""),
+                )
+                self.queue.upsert_ready(
+                    item,
+                    autopilot=bool(row.get("autopilot")),
+                    status=str(row.get("status") or "Ожидает"),
+                )
+                imported += 1
+            if imported:
+                legacy.replace(migrated)
+                print(f"[QUEUE] Импортировано из старой JSON-очереди: {imported}")
+        except Exception as exc:
+            print(f"[QUEUE] Не удалось импортировать desktop_queue.json: {exc}")
     def clear(self) -> None:
         # Explicit clear only. Startup now passes clear_queue=False.
         for row in self.queue.list_ready():
