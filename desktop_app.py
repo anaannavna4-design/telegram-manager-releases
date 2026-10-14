@@ -16,9 +16,9 @@ from tkinter import filedialog, messagebox, ttk
 
 from app_paths import account_dir, import_legacy_data, runtime_dir, source_dir
 from settings_store import load_accounts, load_settings, save_accounts, save_settings
-from desktop_bridge import load_desktop_queue, submit_desktop_command
+from desktop_bridge import load_desktop_queue, load_queue_stats, submit_desktop_command
 
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.2.0 RC1"
 
 # Telegram Manager inspired palette
 BG = "#0b1017"
@@ -187,6 +187,7 @@ class NeuroCommentDesktop(tk.Tk):
         self.desktop_queue = []
         self.desktop_queue_by_key = {}
         self._queue_signature = None
+        self.queue_stats = {"queued_ai": 0, "processing_ai": 0, "ready": 0, "total": 0}
 
         self._configure_style()
         self._install_clipboard_support()
@@ -859,10 +860,8 @@ class NeuroCommentDesktop(tk.Tk):
         return str(selected[0]) if selected else ""
 
     def _refresh_comments_from_disk(self):
-        if self._engine_is_running():
-            self.desktop_queue = load_desktop_queue()
-        else:
-            self.desktop_queue = []
+        self.desktop_queue = load_desktop_queue()
+        self.queue_stats = load_queue_stats()
         self.desktop_queue_by_key = {
             str(item.get("key")): item for item in self.desktop_queue if item.get("key")
         }
@@ -870,17 +869,22 @@ class NeuroCommentDesktop(tk.Tk):
 
     def _poll_desktop_queue(self):
         try:
-            if self._engine_is_running():
-                items = load_desktop_queue()
-            else:
-                items = []
-            signature = tuple(
-                (str(x.get("key")), str(x.get("comment")), str(x.get("status")), bool(x.get("autopilot")))
-                for x in items
+            items = load_desktop_queue()
+            stats = load_queue_stats()
+            signature = (
+                tuple(
+                    (str(x.get("key")), str(x.get("comment")), str(x.get("status")), bool(x.get("autopilot")))
+                    for x in items
+                ),
+                int(stats.get("queued_ai", 0)),
+                int(stats.get("processing_ai", 0)),
+                int(stats.get("ready", 0)),
+                int(stats.get("total", 0)),
             )
             if signature != self._queue_signature:
                 self._queue_signature = signature
                 self.desktop_queue = items
+                self.queue_stats = stats
                 self.desktop_queue_by_key = {
                     str(item.get("key")): item for item in items if item.get("key")
                 }
@@ -915,7 +919,16 @@ class NeuroCommentDesktop(tk.Tk):
                 ),
             )
         count = len(self.desktop_queue)
-        self.comments_counter.configure(text=f"В очереди: {count}")
+        stats = self.queue_stats or {}
+        queued_ai = int(stats.get("queued_ai", 0))
+        processing_ai = int(stats.get("processing_ai", 0))
+        total = int(stats.get("total", count))
+        self.comments_counter.configure(
+            text=(
+                f"Готово: {count}  •  Ожидают AI: {queued_ai}  •  "
+                f"Обрабатывается: {processing_ai}  •  Всего: {total}"
+            )
+        )
         if "comments" in self.nav_buttons:
             self.nav_buttons["comments"].configure(text=f"Комментарии ({count})" if count else "Комментарии")
         if selected and selected in self.desktop_queue_by_key:
@@ -1857,10 +1870,8 @@ class NeuroCommentDesktop(tk.Tk):
             self.home_start_btn.configure(state="normal")
             self.home_stop_btn.configure(state="disabled")
             if hasattr(self, "comments_tree"):
-                self.desktop_queue = []
-                self.desktop_queue_by_key = {}
-                self._queue_signature = ()
-                self._refresh_comments_table()
+                self._queue_signature = None
+                self._refresh_comments_from_disk()
         self._update_home_stats()
 
     # ---------------------------- logs / filesystem ----------------------------
