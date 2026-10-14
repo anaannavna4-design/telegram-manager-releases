@@ -19,7 +19,10 @@ from qrcode import QRCode
 from datetime import datetime, timezone
 from telethon.errors import SessionPasswordNeededError
 from app_paths import account_dir
-from desktop_bridge import DesktopBridge, consume_desktop_commands
+from desktop_bridge import (
+    DesktopBridge, consume_desktop_commands,
+    ack_desktop_command, retry_desktop_command,
+)
 from publisher import publish_comment
 
 
@@ -328,44 +331,76 @@ async def run_account(account):
         "tasks": [],
     }
 
-    ai_queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
+    # Restore comments that were already generated before a restart.
+    restored_ready = bridge.list_ready_items(name)
+    for restored_item in restored_ready:
+        try:
+            await store.add(restored_item)
+        except Exception:
+            pass
+    if restored_ready:
+        print(f"[{name}][QUEUE] Восстановлено готовых комментариев: {len(restored_ready)}")
 
     async def candidate(item=None, error=None):
         if error:
             print(f"[{name}] AI error:", error)
             return True
-        if ai_queue.full():
-            print(f"[{name}] Очередь заполнена — пост отложен: {item.key}")
+        if item is None:
             return False
-        ai_queue.put_nowait(item)
-        return True
+
+        warned = False
+        while True:
+            result = bridge.enqueue_ai(
+                item, account=name, autopilot=inst["autopilot"]
+            )
+            if result == "inserted":
+                stats = bridge.stats()
+                print(
+                    f"[{name}][QUEUE] Добавлен {item.key}; "
+                    f"ожидают AI: {stats.get('queued_ai', 0)}, "
+                    f"готово: {stats.get('ready', 0)}, всего: {stats.get('total', 0)}"
+                )
+                return True
+            if result == "exists":
+                return True
+
+            if not warned:
+                stats = bridge.stats()
+                print(
+                    f"[{name}][BACKPRESSURE] Постоянная очередь заполнена "
+                    f"({stats.get('total', 0)} задач). Backfill приостановлен; "
+                    f"ожидаю свободное место для {item.key}."
+                )
+                warned = True
+            await asyncio.sleep(2)
 
     async def ai_worker():
         while True:
-            item = await ai_queue.get()
+            item = bridge.claim_next_ai(name)
+            if item is None:
+                await asyncio.sleep(0.75)
+                continue
+
             try:
-                print(f"[{name}][AI] Обрабатываю {item.key} (в очереди: {ai_queue.qsize()})...")
+                stats = bridge.stats()
+                print(
+                    f"[{name}][AI] Обрабатываю {item.key} "
+                    f"(ожидают AI: {stats.get('queued_ai', 0)})..."
+                )
                 comment = await asyncio.to_thread(generate_comment, item.post_text)
                 if comment.upper() == "SKIP":
-                    # AI finished this post deliberately; only now persist it
-                    # as processed. If AI had failed, it would remain retryable.
+                    bridge.remove(item.key)
                     mon.complete_candidate(item.key, processed=True)
                     print(f"[{name}][AI] SKIP: {item.key}")
                     continue
-                item.comment = comment
-                await store.add(item)
 
-                # PC is now the primary control surface. Candidate appears in
-                # the desktop queue regardless of whether a bot is configured.
+                item.comment = comment
+                item.account = name
+                await store.add(item)
                 bridge.upsert(item, autopilot=inst["autopilot"], status="Ожидает")
-                # Candidate is now safely available to the user, so it may be
-                # persisted as seen. Until this point a crash/error must not
-                # make the post disappear forever.
                 mon.complete_candidate(item.key, processed=True)
                 print(f"[{name}][DESKTOP] Новый кандидат: {item.key}")
 
-                # Wait until main() decides whether the optional Telegram bot
-                # panel is actually available. This does not delay PC display.
                 if control_ready is not None:
                     await control_ready.wait()
                 if panel is not None:
@@ -379,18 +414,11 @@ async def run_account(account):
                 elif inst["autopilot"]:
                     _schedule_local_autopilot(inst, item)
             except Exception as exc:
-                # Do not persist failed AI jobs as seen. Release the volatile
-                # reservation so backfill can retry the post later.
+                bridge.requeue_ai(item.key, str(exc))
                 mon.complete_candidate(item.key, processed=False)
                 print(f"[{name}] AI error: {exc}")
-                try:
-                    bridge.set_status(item.key, f"Ошибка AI: {type(exc).__name__}")
-                except Exception:
-                    pass
             finally:
-                ai_queue.task_done()
                 await asyncio.sleep(AI_REQUEST_INTERVAL)
-
     ai_task = asyncio.create_task(ai_worker())
 
     await login_account(client, name)
@@ -527,7 +555,7 @@ async def main():
     if not ACCOUNTS:
         raise RuntimeError("Добавьте хотя бы один Telegram-аккаунт в NeuroComment Desktop.")
 
-    bridge = DesktopBridge(clear_queue=True)
+    bridge = DesktopBridge(clear_queue=False)
     control_ready = asyncio.Event()
 
     instances = {}
@@ -564,7 +592,7 @@ async def main():
     try:
         print(f"✓ Аккаунтов в работе: {len(instances)}")
         print("✓ PC-панель комментариев активна.")
-        print("NeuroComment 1.1.4 Desktop engine запущен.")
+        print("NeuroComment 1.2.0 RC1 Desktop engine запущен.")
 
         waiters = [
             asyncio.create_task(inst["client"].run_until_disconnected())
