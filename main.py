@@ -611,9 +611,27 @@ async def main():
     all_tasks.append(command_task)
     control_ready.set()
 
+    # Ready autopilot items also survive a restart. If BotPanel is unavailable,
+    # resume local autopilot scheduling from the durable queue.
+    if panel is None:
+        for inst in instances.values():
+            if not inst.get("autopilot"):
+                continue
+            restored = bridge.list_ready_items(inst["name"])
+            for item in restored:
+                _schedule_local_autopilot(inst, item)
+            if restored:
+                print(f"[{inst['name']}][AUTOPILOT-PC] Восстановлено задач: {len(restored)}")
+
     try:
         print(f"✓ Аккаунтов в работе: {len(instances)}")
         print("✓ PC-панель комментариев активна.")
+        stats = bridge.stats()
+        print(
+            f"✓ Постоянная очередь: AI={stats.get('queued_ai', 0)}, "
+            f"обработка={stats.get('processing_ai', 0)}, "
+            f"готово={stats.get('ready', 0)}, всего={stats.get('total', 0)}"
+        )
         print("NeuroComment 1.2.0 RC1 Desktop engine запущен.")
 
         waiters = [
