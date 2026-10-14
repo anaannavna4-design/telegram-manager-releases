@@ -57,6 +57,8 @@ class DesktopBridge:
 
     def __init__(self, clear_queue: bool = False):
         self.queue = _queue()
+        # Only the engine constructs DesktopBridge, so restart recovery belongs here.
+        self.queue.recover_after_restart()
         # Kept only for API compatibility. A commercial build must never wipe
         # the queue just because the engine starts.
         if clear_queue:
