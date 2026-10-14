@@ -1229,6 +1229,7 @@ class NeuroCommentDesktop(tk.Tk):
         self.discover_hours_var = tk.StringVar()
         self.backfill_var = tk.StringVar()
         self.inactive_days_var = tk.StringVar()
+        self.persistent_queue_limit_var = tk.StringVar()
         self.auto_leave_banned_var = tk.BooleanVar()
 
         self._field_row(box, 1, "Задержка автопубликации, сек", self.autopilot_delay_var, width=18)
@@ -1238,9 +1239,10 @@ class NeuroCommentDesktop(tk.Tk):
         self._field_row(box, 5, "Обновление списка, часов", self.discover_hours_var, width=18)
         self._field_row(box, 6, "Backfill: постов на канал", self.backfill_var, width=18)
         self._field_row(box, 7, "Покидать неактивные через, дней", self.inactive_days_var, width=18)
+        self._field_row(box, 8, "Максимум задач в постоянной очереди", self.persistent_queue_limit_var, width=18)
         self._checkbox(
             box, "Автоматически покидать каналы при подтверждённом бане", self.auto_leave_banned_var
-        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
     # ---------------------------- logs ----------------------------
 
@@ -1336,6 +1338,7 @@ class NeuroCommentDesktop(tk.Tk):
         self.discover_hours_var.set(str(max(0, int(s.get("discover_interval", 21600)) // 3600)))
         self.backfill_var.set(str(s.get("backfill_limit", 3)))
         self.inactive_days_var.set(str(s.get("auto_leave_inactive_days", 30)))
+        self.persistent_queue_limit_var.set(str(s.get("persistent_queue_limit", 2000)))
         self.auto_leave_banned_var.set(bool(s.get("auto_leave_banned_channels", True)))
         self._refresh_ai_provider_ui()
         self._refresh_accounts()
@@ -1370,6 +1373,7 @@ class NeuroCommentDesktop(tk.Tk):
             "discover_interval": max(0, _as_int(self.discover_hours_var.get(), 6)) * 3600,
             "backfill_limit": max(0, _as_int(self.backfill_var.get(), 3)),
             "auto_leave_inactive_days": max(0, _as_int(self.inactive_days_var.get(), 30)),
+            "persistent_queue_limit": max(100, _as_int(self.persistent_queue_limit_var.get(), 2000)),
             "auto_leave_banned_channels": bool(self.auto_leave_banned_var.get()),
             "telegram_login_mode": "qr",
         })
