@@ -76,7 +76,8 @@ AI_CUSTOM_PROMPT = str(_SETTINGS.get("ai_custom_prompt") or "")
 MAX_PENDING_ITEMS = int(_SETTINGS.get("max_pending_items") or 50)
 AI_REQUEST_INTERVAL = int(_SETTINGS.get("ai_request_interval") or 10)
 AI_MAX_POST_CHARS = int(_SETTINGS.get("ai_max_post_chars") or 1500)
-MAX_QUEUE_SIZE = int(_SETTINGS.get("ai_queue_size") or 75)
+MAX_QUEUE_SIZE = int(_SETTINGS.get("ai_queue_size") or 75)  # legacy compatibility
+PERSISTENT_QUEUE_LIMIT = max(100, int(_SETTINGS.get("persistent_queue_limit") or 2000))
 
 # Ротация каналов
 BATCH_SIZE = int(_SETTINGS.get("batch_size") or 50)
