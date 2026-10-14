@@ -462,25 +462,42 @@ async def _find_pending(instances, key):
         item = await inst["store"].get(key)
         if item is not None:
             return inst, item
+
+    # Rehydrate a ready task directly from SQLite after a restart.
+    item = bridge.get_item(key)
+    if item is not None:
+        inst = instances.get(str(getattr(item, "account", "") or ""))
+        if inst is not None:
+            try:
+                await inst["store"].add(item)
+            except Exception:
+                pass
+            return inst, item
     return None, None
 
 
 async def desktop_command_loop(instances):
-    """Execute actions requested from the Windows desktop UI."""
+    """Execute durable actions requested from the Windows desktop UI."""
     while True:
         for command in consume_desktop_commands():
+            command_id = str(command.get("id") or "")
             action = str(command.get("action") or "").lower()
             key = str(command.get("key") or "")
             if not action or not key:
+                if command_id:
+                    ack_desktop_command(command_id)
                 continue
 
-            inst, item = await _find_pending(instances, key)
-            if item is None:
-                bridge.remove(key)
-                print(f"[DESKTOP] Команда {action}: {key} уже обработан.")
-                continue
-
+            item = None
             try:
+                inst, item = await _find_pending(instances, key)
+                if item is None:
+                    bridge.remove(key)
+                    print(f"[DESKTOP] Команда {action}: {key} уже обработан.")
+                    if command_id:
+                        ack_desktop_command(command_id)
+                    continue
+
                 if action == "skip":
                     _cancel_local_autopilot(key)
                     await inst["store"].pop(key)
@@ -488,21 +505,19 @@ async def desktop_command_loop(instances):
                     if panel is not None:
                         await panel.sync_desktop_action("skip", item)
                     print(f"[{item.account}][DESKTOP] Пропущено: {key}")
-                    continue
 
-                if action == "edit":
+                elif action == "edit":
                     new_comment = str(command.get("comment") or "").strip()
                     if not new_comment:
                         bridge.set_status(key, "Комментарий пуст")
-                        continue
-                    item.comment = new_comment
-                    bridge.upsert(item, autopilot=inst["autopilot"], status="Ожидает")
-                    if panel is not None:
-                        await panel.sync_desktop_action("edit", item)
-                    print(f"[{item.account}][DESKTOP] Комментарий изменён: {key}")
-                    continue
+                    else:
+                        item.comment = new_comment
+                        bridge.upsert(item, autopilot=inst["autopilot"], status="Ожидает")
+                        if panel is not None:
+                            await panel.sync_desktop_action("edit", item)
+                        print(f"[{item.account}][DESKTOP] Комментарий изменён: {key}")
 
-                if action == "regen":
+                elif action == "regen":
                     _cancel_local_autopilot(key)
                     bridge.set_status(key, "AI: новый вариант…")
                     new_comment = await asyncio.to_thread(generate_comment, item.post_text)
@@ -510,17 +525,16 @@ async def desktop_command_loop(instances):
                         bridge.set_status(key, "AI не предложил вариант")
                         if panel is None and inst["autopilot"]:
                             _schedule_local_autopilot(inst, item)
-                        continue
-                    item.comment = new_comment
-                    bridge.upsert(item, autopilot=inst["autopilot"], status="Ожидает")
-                    if panel is not None:
-                        await panel.sync_desktop_action("regen", item)
-                    elif inst["autopilot"]:
-                        _schedule_local_autopilot(inst, item)
-                    print(f"[{item.account}][DESKTOP] Новый AI-вариант: {key}")
-                    continue
+                    else:
+                        item.comment = new_comment
+                        bridge.upsert(item, autopilot=inst["autopilot"], status="Ожидает")
+                        if panel is not None:
+                            await panel.sync_desktop_action("regen", item)
+                        elif inst["autopilot"]:
+                            _schedule_local_autopilot(inst, item)
+                        print(f"[{item.account}][DESKTOP] Новый AI-вариант: {key}")
 
-                if action == "approve":
+                elif action == "approve":
                     _cancel_local_autopilot(key)
                     if panel is not None:
                         panel._cancel_autopilot(key)
@@ -538,15 +552,23 @@ async def desktop_command_loop(instances):
                     if panel is not None:
                         await panel.sync_desktop_action("approve", item, result=result)
                     print(f"[{item.account}][DESKTOP] Публикация {key}: {result}")
-                    continue
 
-                print(f"[DESKTOP] Неизвестная команда: {action}")
+                else:
+                    print(f"[DESKTOP] Неизвестная команда: {action}")
+
+                if command_id:
+                    ack_desktop_command(command_id)
             except Exception as exc:
-                bridge.set_status(key, f"Ошибка: {type(exc).__name__}")
-                print(f"[{item.account}][DESKTOP] Ошибка {action} {key}: {type(exc).__name__}: {exc}")
+                if item is not None:
+                    bridge.set_status(key, f"Ошибка: {type(exc).__name__}")
+                    account_name = getattr(item, "account", "?")
+                    print(f"[{account_name}][DESKTOP] Ошибка {action} {key}: {type(exc).__name__}: {exc}")
+                else:
+                    print(f"[DESKTOP] Ошибка {action} {key}: {type(exc).__name__}: {exc}")
+                if command_id:
+                    retry_desktop_command(command_id, f"{type(exc).__name__}: {exc}")
 
         await asyncio.sleep(0.35)
-
 
 async def main():
     global panel, bridge, control_ready
