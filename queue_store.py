@@ -28,7 +28,6 @@ class PersistentQueue:
         self.max_tasks = max(100, int(max_tasks or 2000))
         self._lock = threading.RLock()
         self._init_db()
-        self.recover_after_restart()
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(str(self.path), timeout=30)
