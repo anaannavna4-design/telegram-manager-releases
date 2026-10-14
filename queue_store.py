@@ -382,16 +382,22 @@ class PersistentQueue:
 
     def retry_command(self, command_id: str, error: str = "") -> None:
         with self._lock, self._connect() as con:
+            row = con.execute(
+                "SELECT attempts FROM commands WHERE id=?",
+                (str(command_id),),
+            ).fetchone()
+            attempts = int(row["attempts"] or 0) + 1 if row else 1
+            state = "failed" if attempts >= 3 else "pending"
             con.execute(
                 """
                 UPDATE commands
-                   SET state='pending',
-                       attempts=attempts+1,
+                   SET state=?,
+                       attempts=?,
                        updated_at=?,
                        last_error=?
                  WHERE id=?
                 """,
-                (time.time(), str(error)[:1000], str(command_id)),
+                (state, attempts, time.time(), str(error)[:1000], str(command_id)),
             )
 
 
