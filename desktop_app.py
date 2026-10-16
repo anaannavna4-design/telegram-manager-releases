@@ -16,9 +16,12 @@ from tkinter import filedialog, messagebox, ttk
 
 from app_paths import account_dir, import_legacy_data, runtime_dir, source_dir
 from settings_store import load_accounts, load_settings, save_accounts, save_settings
-from desktop_bridge import load_desktop_queue, load_queue_stats, submit_desktop_command
+from desktop_bridge import (
+    load_desktop_queue, load_queue_stats, load_captcha_queue,
+    submit_desktop_command,
+)
 
-APP_VERSION = "1.2.0 RC2"
+APP_VERSION = "1.2.0 RC3"
 
 # Telegram Manager inspired palette
 BG = "#0b1017"
@@ -188,6 +191,10 @@ class NeuroCommentDesktop(tk.Tk):
         self.desktop_queue_by_key = {}
         self._queue_signature = None
         self.queue_stats = {"queued_ai": 0, "processing_ai": 0, "ready": 0, "total": 0}
+        self.captcha_queue = []
+        self.captcha_queue_by_id = {}
+        self._captcha_signature = None
+        self._captcha_image_ref = None
 
         self._configure_style()
         self._install_clipboard_support()
@@ -196,6 +203,7 @@ class NeuroCommentDesktop(tk.Tk):
         self._update_status(False)
         self.show_page("home")
         self.after(500, self._poll_desktop_queue)
+        self.after(650, self._poll_captcha_queue)
 
     # ---------------------------- theme / helpers ----------------------------
 
@@ -536,7 +544,7 @@ class NeuroCommentDesktop(tk.Tk):
         self.page_container = tk.Frame(self.content_shell, bg=BG)
         self.page_container.pack(fill="both", expand=True)
 
-        for key in ("home", "accounts", "channels", "comments", "settings", "logs", "about"):
+        for key in ("home", "accounts", "channels", "comments", "verifications", "settings", "logs", "about"):
             page = tk.Frame(self.page_container, bg=BG)
             self.pages[key] = page
 
@@ -544,6 +552,7 @@ class NeuroCommentDesktop(tk.Tk):
         self._build_accounts_page()
         self._build_channels_page()
         self._build_comments_page()
+        self._build_verifications_page()
         self._build_settings_page()
         self._build_logs_page()
         self._build_about_page()
@@ -588,6 +597,7 @@ class NeuroCommentDesktop(tk.Tk):
             ("accounts", "Аккаунты"),
             ("channels", "Каналы"),
             ("comments", "Комментарии"),
+            ("verifications", "Проверки"),
             ("settings", "Настройки"),
             ("logs", "Логи"),
             ("about", "О программе"),
@@ -1106,6 +1116,398 @@ class NeuroCommentDesktop(tk.Tk):
             return messagebox.showerror("Комментарии", "Комментарий не может быть пустым.", parent=self)
         submit_desktop_command("edit", key, comment=comment)
         self.comments_hint.configure(text="Правка отправлена движку…")
+
+
+    # ---------------------------- manual Telegram verifications ----------------------------
+
+    def _build_verifications_page(self):
+        page = self.pages["verifications"]
+        self._page_header(
+            page,
+            "Проверки",
+            "Ручные антиспам-проверки Telegram. Ответ выбираете или вводите вы; NeuroComment только отправляет его через вашу сессию.",
+        )
+
+        toolbar = tk.Frame(page, bg=BG)
+        toolbar.pack(fill="x", pady=(0, 8))
+        self.captcha_counter = self._label(
+            toolbar, "Ожидают ответа: 0", muted=True, bg=BG
+        )
+        self.captcha_counter.pack(side="left")
+        self._button(
+            toolbar, "Обновить", self._refresh_captcha_from_disk
+        ).pack(side="right")
+
+        table = self._panel(page, padding=0)
+        table.pack(fill="x")
+        columns = ("account", "chat", "bot", "status")
+        self.captcha_tree = ttk.Treeview(
+            table,
+            columns=columns,
+            show="headings",
+            height=7,
+            style="Dark.Treeview",
+        )
+        specs = {
+            "account": ("Аккаунт", 120),
+            "chat": ("Чат / группа", 310),
+            "bot": ("Защитный бот", 220),
+            "status": ("Статус", 190),
+        }
+        for key, (title, width) in specs.items():
+            self.captcha_tree.heading(key, text=title)
+            self.captcha_tree.column(key, width=width, anchor="w")
+        self.captcha_tree.pack(side="left", fill="x", expand=True)
+        scroll = ttk.Scrollbar(
+            table,
+            orient="vertical",
+            command=self.captcha_tree.yview,
+            style="Dark.Vertical.TScrollbar",
+        )
+        scroll.pack(side="right", fill="y")
+        self.captcha_tree.configure(yscrollcommand=scroll.set)
+        self.captcha_tree.bind("<<TreeviewSelect>>", self._on_captcha_selected)
+
+        detail = tk.Frame(page, bg=BG)
+        detail.pack(fill="both", expand=True, pady=(12, 0))
+        detail.grid_columnconfigure(0, weight=3)
+        detail.grid_columnconfigure(1, weight=2)
+        detail.grid_rowconfigure(0, weight=1)
+
+        left = self._panel(detail, padding=10)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self._label(left, "Сообщение проверки", bold=True, bg=PANEL).pack(
+            anchor="w", pady=(0, 7)
+        )
+        self.captcha_text = self._text(left, height=10, wrap="word")
+        self.captcha_text.pack(fill="both", expand=True)
+        self.captcha_text.configure(state="disabled")
+
+        answer_row = tk.Frame(left, bg=PANEL)
+        answer_row.pack(fill="x", pady=(10, 0))
+        self.captcha_answer_var = tk.StringVar()
+        self.captcha_answer_entry = self._entry(
+            answer_row, self.captcha_answer_var, width=40
+        )
+        self.captcha_answer_entry.pack(
+            side="left", fill="x", expand=True, padx=(0, 8)
+        )
+        self._button(
+            answer_row,
+            "Отправить ответ",
+            self._submit_captcha_text,
+            primary=True,
+        ).pack(side="right")
+
+        self._label(
+            left,
+            "Если проверка предлагает кнопки, выберите одну из них ниже.",
+            muted=True,
+            size=8,
+            bg=PANEL,
+        ).pack(anchor="w", pady=(10, 5))
+
+        self.captcha_buttons_frame = tk.Frame(left, bg=PANEL)
+        self.captcha_buttons_frame.pack(fill="x")
+
+        right = self._panel(detail, padding=10)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self._label(right, "Изображение / медиа", bold=True, bg=PANEL).pack(
+            anchor="w", pady=(0, 7)
+        )
+        self.captcha_image_label = tk.Label(
+            right,
+            text="Нет изображения",
+            bg=PANEL_DARK,
+            fg=MUTED,
+            justify="center",
+            anchor="center",
+            font=("Segoe UI", 9),
+            highlightbackground=BORDER_SOFT,
+            highlightthickness=1,
+        )
+        self.captcha_image_label.pack(fill="both", expand=True)
+
+        self.captcha_error_label = self._label(
+            right, "", muted=True, size=8, bg=PANEL
+        )
+        self.captcha_error_label.pack(anchor="w", fill="x", pady=(8, 0))
+
+        actions = tk.Frame(page, bg=BG)
+        actions.pack(fill="x", pady=(10, 0))
+        self._button(
+            actions,
+            "✓ Проверка пройдена",
+            self._captcha_done,
+            primary=True,
+        ).pack(side="left", padx=(0, 7))
+        self._button(
+            actions,
+            "Удалить",
+            self._captcha_delete,
+            danger=True,
+        ).pack(side="left")
+        self.captcha_hint = self._label(
+            actions,
+            "Выберите проверку.",
+            muted=True,
+            bg=BG,
+        )
+        self.captcha_hint.pack(side="right")
+
+    def _selected_captcha_id(self):
+        selected = self.captcha_tree.selection() if hasattr(self, "captcha_tree") else ()
+        return str(selected[0]) if selected else ""
+
+    def _refresh_captcha_from_disk(self):
+        self.captcha_queue = load_captcha_queue()
+        self.captcha_queue_by_id = {
+            str(item.get("id")): item
+            for item in self.captcha_queue
+            if item.get("id")
+        }
+        self._refresh_captcha_table()
+
+    def _poll_captcha_queue(self):
+        try:
+            items = load_captcha_queue()
+            signature = tuple(
+                (
+                    str(x.get("id") or ""),
+                    str(x.get("status") or ""),
+                    str(x.get("challenge_text") or ""),
+                    str(x.get("media_path") or ""),
+                    str(x.get("buttons") or ""),
+                    str(x.get("last_error") or ""),
+                )
+                for x in items
+            )
+            if signature != self._captcha_signature:
+                self._captcha_signature = signature
+                self.captcha_queue = items
+                self.captcha_queue_by_id = {
+                    str(item.get("id")): item
+                    for item in items
+                    if item.get("id")
+                }
+                self._refresh_captcha_table()
+        except Exception as exc:
+            self._append_log(
+                f"[DESKTOP] Не удалось обновить проверки: {exc}\n"
+            )
+        finally:
+            if not self._closing:
+                self.after(750, self._poll_captcha_queue)
+
+    def _refresh_captcha_table(self):
+        if not hasattr(self, "captcha_tree"):
+            return
+
+        selected = self._selected_captcha_id()
+        for row in self.captcha_tree.get_children():
+            self.captcha_tree.delete(row)
+
+        for item in self.captcha_queue:
+            challenge_id = str(item.get("id") or "")
+            if not challenge_id:
+                continue
+            bot_name = (
+                str(item.get("sender_username") or "")
+                or str(item.get("sender_name") or "")
+                or "Telegram bot"
+            )
+            self.captcha_tree.insert(
+                "",
+                "end",
+                iid=challenge_id,
+                values=(
+                    item.get("account", ""),
+                    item.get("chat_title", ""),
+                    bot_name,
+                    item.get("status", "Ожидает ответа"),
+                ),
+            )
+
+        count = len(self.captcha_queue)
+        self.captcha_counter.configure(text=f"Ожидают проверки: {count}")
+        if "verifications" in self.nav_buttons:
+            self.nav_buttons["verifications"].configure(
+                text=f"Проверки ({count})" if count else "Проверки"
+            )
+
+        if selected and selected in self.captcha_queue_by_id:
+            self.captcha_tree.selection_set(selected)
+            self.captcha_tree.focus(selected)
+            self._show_captcha_item(self.captcha_queue_by_id[selected])
+        elif count:
+            first = str(self.captcha_queue[0].get("id"))
+            self.captcha_tree.selection_set(first)
+            self.captcha_tree.focus(first)
+            self._show_captcha_item(self.captcha_queue_by_id[first])
+        else:
+            self._show_captcha_item(None)
+
+    def _on_captcha_selected(self, _event=None):
+        challenge_id = self._selected_captcha_id()
+        self._show_captcha_item(
+            self.captcha_queue_by_id.get(challenge_id)
+        )
+
+    def _clear_captcha_buttons(self):
+        if not hasattr(self, "captcha_buttons_frame"):
+            return
+        for child in self.captcha_buttons_frame.winfo_children():
+            child.destroy()
+
+    def _show_captcha_item(self, item):
+        if not hasattr(self, "captcha_text"):
+            return
+
+        self._clear_captcha_buttons()
+        self.captcha_answer_var.set("")
+        self._captcha_image_ref = None
+
+        if not item:
+            self._set_text_widget(self.captcha_text, "", readonly=True)
+            self.captcha_image_label.configure(
+                image="",
+                text="Нет изображения",
+            )
+            self.captcha_error_label.configure(text="")
+            self.captcha_hint.configure(text="Выберите проверку.")
+            return
+
+        self._set_text_widget(
+            self.captcha_text,
+            str(item.get("challenge_text") or "(текст отсутствует)"),
+            readonly=True,
+        )
+
+        buttons = item.get("buttons") or []
+        if buttons:
+            for index, button in enumerate(buttons):
+                label = str(button.get("text") or f"Вариант {index + 1}")
+                if str(button.get("type") or "") == "url":
+                    command = lambda u=str(button.get("url") or ""): self._open_captcha_url(u)
+                else:
+                    row = int(button.get("row") or 0)
+                    col = int(button.get("col") or 0)
+                    command = lambda r=row, cc=col: self._submit_captcha_click(r, cc)
+                self._button(
+                    self.captcha_buttons_frame,
+                    label,
+                    command,
+                ).pack(side="left", padx=(0, 6), pady=(0, 6))
+
+        media_path = str(item.get("media_path") or "").strip()
+        if media_path:
+            try:
+                from PIL import Image, ImageTk
+
+                image = Image.open(media_path)
+                image.thumbnail((390, 260))
+                self._captcha_image_ref = ImageTk.PhotoImage(image)
+                self.captcha_image_label.configure(
+                    image=self._captcha_image_ref,
+                    text="",
+                )
+            except Exception:
+                self.captcha_image_label.configure(
+                    image="",
+                    text=f"Не удалось открыть медиа\n{media_path}",
+                )
+        else:
+            self.captcha_image_label.configure(
+                image="",
+                text="Нет изображения",
+            )
+
+        error = str(item.get("last_error") or "").strip()
+        self.captcha_error_label.configure(
+            text=f"Ошибка: {error}" if error else ""
+        )
+        self.captcha_hint.configure(
+            text=(
+                f"{item.get('account', '')} • "
+                f"{item.get('chat_title', '')} • "
+                f"{item.get('status', 'Ожидает ответа')}"
+            )
+        )
+
+    def _ensure_captcha_action_ready(self):
+        if not self._engine_is_running():
+            messagebox.showinfo(
+                "Проверки",
+                "Сначала запустите движок NeuroComment.",
+                parent=self,
+            )
+            return ""
+        challenge_id = self._selected_captcha_id()
+        if not challenge_id:
+            messagebox.showinfo(
+                "Проверки",
+                "Выберите проверку.",
+                parent=self,
+            )
+            return ""
+        return challenge_id
+
+    def _submit_captcha_text(self):
+        challenge_id = self._ensure_captcha_action_ready()
+        if not challenge_id:
+            return
+        answer = self.captcha_answer_var.get().strip()
+        if not answer:
+            return messagebox.showinfo(
+                "Проверки",
+                "Введите ответ.",
+                parent=self,
+            )
+        submit_desktop_command(
+            "captcha_text",
+            challenge_id,
+            comment=answer,
+        )
+        self.captcha_hint.configure(text="Ответ отправляется…")
+
+    def _submit_captcha_click(self, row: int, col: int):
+        challenge_id = self._ensure_captcha_action_ready()
+        if not challenge_id:
+            return
+        submit_desktop_command(
+            "captcha_click",
+            challenge_id,
+            comment=f"{int(row)}:{int(col)}",
+        )
+        self.captcha_hint.configure(text="Ответ отправляется…")
+
+    def _open_captcha_url(self, url: str):
+        if not url:
+            return
+        import webbrowser
+        webbrowser.open(url)
+
+    def _captcha_done(self):
+        challenge_id = self._ensure_captcha_action_ready()
+        if not challenge_id:
+            return
+        submit_desktop_command("captcha_done", challenge_id)
+        self.captcha_hint.configure(
+            text="Проверка отмечается как пройденная…"
+        )
+
+    def _captcha_delete(self):
+        challenge_id = self._ensure_captcha_action_ready()
+        if not challenge_id:
+            return
+        if not messagebox.askyesno(
+            "Удалить проверку",
+            "Удалить эту проверку из очереди?",
+            parent=self,
+        ):
+            return
+        submit_desktop_command("captcha_delete", challenge_id)
+        self.captcha_hint.configure(text="Проверка удаляется…")
 
     # ---------------------------- settings ----------------------------
 
