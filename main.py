@@ -783,7 +783,16 @@ async def desktop_command_loop(instances):
                 else:
                     print(f"[DESKTOP] Ошибка {action} {key}: {type(exc).__name__}: {exc}")
                 if command_id:
-                    retry_desktop_command(command_id, f"{type(exc).__name__}: {exc}")
+                    if action.startswith("captcha_"):
+                        # A verification answer/button is a user action. Do not
+                        # automatically repeat it after an error; let the user
+                        # decide whether to try again.
+                        ack_desktop_command(command_id)
+                    else:
+                        retry_desktop_command(
+                            command_id,
+                            f"{type(exc).__name__}: {exc}",
+                        )
 
         await asyncio.sleep(0.35)
 
