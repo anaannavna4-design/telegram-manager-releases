@@ -123,8 +123,11 @@ class DesktopBridge:
     def upsert(self, item, *, autopilot: bool = False, status: str = "Ожидает") -> None:
         self.queue.upsert_ready(item, autopilot=autopilot, status=status)
 
-    def set_status(self, key: str, status: str) -> None:
-        self.queue.set_status(key, status)
+    def set_status(self, key: str, status: str, *, clear_error: bool = False) -> None:
+        self.queue.set_status(key, status, clear_error=clear_error)
+
+    def set_error(self, key: str, status: str, error: str) -> None:
+        self.queue.set_error(key, status, error)
 
     def remove(self, key: str) -> None:
         self.queue.remove(key)
