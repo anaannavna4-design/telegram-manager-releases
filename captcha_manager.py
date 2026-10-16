@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from pathlib import Path
@@ -56,6 +57,10 @@ class CaptchaManager:
         self.on_resolved = on_resolved
         self._registered = False
         self._handler = None
+        # Serialize publication attempts for this Telegram account. This is the
+        # key anti-burst guard: one publish attempt can trigger a verification,
+        # and every later attempt waits until that result is known.
+        self.publish_lock = asyncio.Lock()
 
     def register(self) -> None:
         if self._registered:
@@ -98,17 +103,17 @@ class CaptchaManager:
         # A success message closes the most recent pending challenge from this
         # account/chat and can resume paused autopilot comments.
         if any(token in low for token in _SUCCESS_KEYWORDS):
-            resolved = self.bridge.resolve_recent_captcha(
+            chat_id = int(getattr(event, "chat_id", 0) or 0)
+            resolved_rows = self.bridge.resolve_captchas_for_chat(
                 self.account,
-                chat_id=int(getattr(event, "chat_id", 0) or 0),
-                max_age_seconds=900,
+                chat_id,
             )
-            if resolved is not None:
+            if resolved_rows:
                 print(
-                    f"[{self.account}][VERIFY] Проверка пройдена: "
-                    f"{resolved.get('id', '?')}"
+                    f"[{self.account}][VERIFY] Проверка пройдена; "
+                    f"закрыто записей: {len(resolved_rows)}"
                 )
-                await self._notify_resolved(resolved)
+                await self._notify_resolved(resolved_rows[-1])
             return
 
         buttons = self._extract_buttons(message)
@@ -214,6 +219,10 @@ class CaptchaManager:
             is not None
         )
 
+    def has_active_pending(self) -> bool:
+        """Block all new publishes for this account until verification closes."""
+        return self.bridge.has_active_captcha(self.account)
+
     async def handle_command(
         self,
         action: str,
@@ -286,14 +295,16 @@ class CaptchaManager:
                 return "Кнопка нажата"
 
             if action == "captcha_done":
-                self.bridge.set_captcha_status(
-                    challenge_id,
-                    "Пройдена",
+                resolved_rows = self.bridge.resolve_captchas_for_chat(
+                    self.account,
+                    chat_id,
                 )
-                await self._notify_resolved(challenge)
+                await self._notify_resolved(
+                    resolved_rows[-1] if resolved_rows else challenge
+                )
                 print(
-                    f"[{self.account}][VERIFY] Пользователь отметил проверку пройденной: "
-                    f"{challenge_id}"
+                    f"[{self.account}][VERIFY] Пользователь отметил проверку "
+                    f"пройденной; закрыто записей: {len(resolved_rows) or 1}"
                 )
                 return "Проверка отмечена как пройденная"
 
