@@ -368,6 +368,17 @@ async def _retry_failed_autopilot_item(inst, item):
 
     if result is True:
         print(f"[{inst['name']}][AUTOPILOT-PC] Повтор успешно опубликован: {key}")
+    elif result == "CAPTCHA_REQUIRED":
+        detail = str(
+            inst.get("last_publish_error")
+            or "Telegram требует ручную антиспам-проверку."
+        )
+        bridge.set_error(key, "Требуется CAPTCHA", detail)
+        print(
+            f"[{inst['name']}][AUTOPILOT-PC] Для {key} требуется "
+            f"ручная проверка — задача сохранена."
+        )
+        return
     else:
         detail = str(
             inst.get("last_publish_error")
