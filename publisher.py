@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from telethon.errors import RPCError
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.functions.messages import GetDiscussionMessageRequest
@@ -114,7 +116,7 @@ async def _join_discussion_and_retry(inst: dict, item, root):
         await client(JoinChannelRequest(root.peer_id))
         print(
             f"[{inst.get('name', '?')}][TELEGRAM] "
-            f"Вступил в группу обсуждений для {item.key}; повторяю публикацию."
+            f"Вступил в группу обсуждений для {item.key}; проверяю защиту."
         )
     except RPCError as join_exc:
         join_name = type(join_exc).__name__
@@ -137,6 +139,20 @@ async def _join_discussion_and_retry(inst: dict, item, root):
         _remember_error(inst, detail, type(join_exc).__name__)
         return "PUBLISH_ERROR"
 
+    captcha_manager = inst.get("captcha_manager")
+    if captcha_manager is not None:
+        # Give Telegram/guard bots a short moment to deliver the verification
+        # challenge triggered by joining the discussion group.
+        await asyncio.sleep(1.5)
+        if captcha_manager.has_recent_pending(max_age_seconds=20):
+            detail = (
+                "После вступления в группу обсуждений Telegram/защитный бот "
+                "потребовал ручную проверку. Откройте вкладку «Проверки» "
+                "в NeuroComment и ответьте на неё там."
+            )
+            _remember_error(inst, detail, "CaptchaRequired")
+            return "CAPTCHA_REQUIRED"
+
     try:
         await client.send_message(
             entity=root.peer_id,
@@ -146,6 +162,18 @@ async def _join_discussion_and_retry(inst: dict, item, root):
         _clear_error(inst)
         return True
     except RPCError as retry_exc:
+        captcha_manager = inst.get("captcha_manager")
+        if (
+            captcha_manager is not None
+            and captcha_manager.has_recent_pending(max_age_seconds=30)
+        ):
+            detail = (
+                "После вступления в группу обсуждений обнаружена ручная "
+                "антиспам-проверка. Ответьте на неё во вкладке «Проверки»."
+            )
+            _remember_error(inst, detail, "CaptchaRequired")
+            return "CAPTCHA_REQUIRED"
+
         detail = _format_telegram_error(
             retry_exc,
             stage="Повторная отправка после вступления в обсуждение",
@@ -175,6 +203,7 @@ async def publish_comment(inst: dict, item):
       ACCOUNT_LIMITED    -> Telegram/account/chat restriction; keep task
       PUBLISH_ERROR      -> other publish error; keep task
       PERMANENT_RESTRICTION -> banned/write-forbidden; do not retry
+      CAPTCHA_REQUIRED    -> wait for a manual verification answer
     """
     client = inst["client"]
     _clear_error(inst)
@@ -223,6 +252,18 @@ async def publish_comment(inst: dict, item):
 
     except RPCError as exc:
         error_name = type(exc).__name__
+
+        captcha_manager = inst.get("captcha_manager")
+        if (
+            captcha_manager is not None
+            and captcha_manager.has_recent_pending(max_age_seconds=30)
+        ):
+            detail = (
+                "Защитный бот требует ручную проверку перед публикацией. "
+                "Откройте вкладку «Проверки» в NeuroComment."
+            )
+            _remember_error(inst, detail, "CaptchaRequired")
+            return "CAPTCHA_REQUIRED"
 
         # Telegram can allow reading a channel but require explicit membership
         # in its linked discussion group before the first comment.
