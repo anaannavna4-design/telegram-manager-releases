@@ -289,18 +289,20 @@ async def _local_autopublish_later(inst, key, delay):
             print(f"[{inst['name']}][AUTOPILOT-PC] Опубликовано: {key} — {item.chat_title}")
         elif result == "ACCOUNT_LIMITED":
             detail = str(inst.get("last_publish_error") or "Telegram отклонил отправку без дополнительного описания.")
-            bridge.set_error(key, "Ограничение Telegram", detail)
             print(
-                f"[{inst['name']}][AUTOPILOT-PC] Ограничение Telegram: "
-                f"{detail.replace(chr(10), ' | ')}"
+                f"[{inst['name']}][AUTOPILOT-PC] Повторная публикация не удалась — "
+                f"удаляю задачу {key}: {detail.replace(chr(10), ' | ')}"
             )
+            await inst["store"].pop(key)
+            bridge.remove(key)
         elif result == "PUBLISH_ERROR":
             detail = str(inst.get("last_publish_error") or "Неизвестная ошибка публикации.")
-            bridge.set_error(key, "Ошибка публикации", detail)
             print(
-                f"[{inst['name']}][AUTOPILOT-PC] Ошибка публикации: "
-                f"{detail.replace(chr(10), ' | ')}"
+                f"[{inst['name']}][AUTOPILOT-PC] Повторная публикация не удалась — "
+                f"удаляю задачу {key}: {detail.replace(chr(10), ' | ')}"
             )
+            await inst["store"].pop(key)
+            bridge.remove(key)
         elif result == "PERMANENT_RESTRICTION":
             detail = str(inst.get("last_publish_error") or "Постоянный запрет Telegram.")
             print(
@@ -331,6 +333,76 @@ def _schedule_local_autopilot(inst, item):
         _local_autopublish_later(inst, key, delay)
     )
     bridge.set_status(key, f"Автопилот через ~{delay} с")
+
+
+async def _retry_failed_autopilot_item(inst, item):
+    """Retry a previously failed autopilot publication once, then discard it."""
+    key = str(item.key)
+    old_status = ""
+    row = bridge.queue.get(key) if getattr(bridge, "queue", None) is not None else None
+    if isinstance(row, dict):
+        old_status = str(row.get("status") or "")
+
+    print(
+        f"[{inst['name']}][AUTOPILOT-PC] Повторная проверка старой ошибки "
+        f"{key} ({old_status or 'ошибка публикации'})..."
+    )
+    bridge.set_status(key, "Повторная публикация…", clear_error=True)
+
+    try:
+        result = await publish_comment(inst, item)
+    except Exception as exc:
+        result = "PUBLISH_ERROR"
+        inst["last_publish_error"] = f"{type(exc).__name__}: {exc}"
+
+    if result is True:
+        print(f"[{inst['name']}][AUTOPILOT-PC] Повтор успешно опубликован: {key}")
+    else:
+        detail = str(
+            inst.get("last_publish_error")
+            or f"Публикация завершилась результатом: {result}"
+        )
+        print(
+            f"[{inst['name']}][AUTOPILOT-PC] Повтор не удался — "
+            f"удаляю задачу {key}: {detail.replace(chr(10), ' | ')}"
+        )
+
+    try:
+        await inst["store"].pop(key)
+    except Exception:
+        pass
+    bridge.remove(key)
+
+
+async def _retry_existing_failed_autopilot(instances):
+    """Immediately retry persisted failed autopilot tasks once after startup."""
+    retry_tasks = []
+
+    for inst in instances.values():
+        if not inst.get("autopilot"):
+            continue
+
+        for item in bridge.list_ready_items(inst["name"]):
+            row = bridge.queue.get(str(item.key))
+            status = str((row or {}).get("status") or "").lower()
+            if (
+                "ограничение telegram" in status
+                or "ошибка публикации" in status
+                or status.startswith("ошибка:")
+            ):
+                _cancel_local_autopilot(item.key)
+                retry_tasks.append(
+                    asyncio.create_task(
+                        _retry_failed_autopilot_item(inst, item)
+                    )
+                )
+
+    if retry_tasks:
+        print(
+            f"[AUTOPILOT-PC] Найдено старых проблемных задач: "
+            f"{len(retry_tasks)}. Повторяю публикацию один раз."
+        )
+        await asyncio.gather(*retry_tasks, return_exceptions=True)
 
 
 async def run_account(account):
@@ -654,14 +726,36 @@ async def main():
     # Ready autopilot items also survive a restart. If BotPanel is unavailable,
     # resume local autopilot scheduling from the durable queue.
     if panel is None:
+        failed_keys = set()
+        for inst in instances.values():
+            if not inst.get("autopilot"):
+                continue
+            for item in bridge.list_ready_items(inst["name"]):
+                row = bridge.queue.get(str(item.key))
+                status = str((row or {}).get("status") or "").lower()
+                if (
+                    "ограничение telegram" in status
+                    or "ошибка публикации" in status
+                    or status.startswith("ошибка:")
+                ):
+                    failed_keys.add(str(item.key))
+
+        # Old failed rows are retried immediately once. Success -> removed;
+        # failure -> also removed, so the queue cannot accumulate dead tasks.
+        await _retry_existing_failed_autopilot(instances)
+
         for inst in instances.values():
             if not inst.get("autopilot"):
                 continue
             restored = bridge.list_ready_items(inst["name"])
+            scheduled = 0
             for item in restored:
+                if str(item.key) in failed_keys:
+                    continue
                 _schedule_local_autopilot(inst, item)
-            if restored:
-                print(f"[{inst['name']}][AUTOPILOT-PC] Восстановлено задач: {len(restored)}")
+                scheduled += 1
+            if scheduled:
+                print(f"[{inst['name']}][AUTOPILOT-PC] Восстановлено обычных задач: {scheduled}")
 
     try:
         print(f"✓ Аккаунтов в работе: {len(instances)}")
