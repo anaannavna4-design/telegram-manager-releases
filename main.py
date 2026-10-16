@@ -656,7 +656,7 @@ async def main():
             f"обработка={stats.get('processing_ai', 0)}, "
             f"готово={stats.get('ready', 0)}, всего={stats.get('total', 0)}"
         )
-        print("NeuroComment 1.2.0 RC1 Desktop engine запущен.")
+        print("NeuroComment 1.2.0 RC2 Desktop engine запущен.")
 
         waiters = [
             asyncio.create_task(inst["client"].run_until_disconnected())
