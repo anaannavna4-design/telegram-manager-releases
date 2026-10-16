@@ -18,7 +18,7 @@ from app_paths import account_dir, import_legacy_data, runtime_dir, source_dir
 from settings_store import load_accounts, load_settings, save_accounts, save_settings
 from desktop_bridge import load_desktop_queue, load_queue_stats, submit_desktop_command
 
-APP_VERSION = "1.2.0 RC1"
+APP_VERSION = "1.2.0 RC2"
 
 # Telegram Manager inspired palette
 BG = "#0b1017"
@@ -848,7 +848,12 @@ class NeuroCommentDesktop(tk.Tk):
         self._button(actions, "✅ Опубликовать", self._desktop_publish, primary=True).pack(side="left", padx=(0, 7))
         self._button(actions, "❌ Пропустить", self._desktop_skip, danger=True).pack(side="left", padx=(0, 7))
         self._button(actions, "🔄 Другой вариант", self._desktop_regen).pack(side="left", padx=(0, 7))
-        self._button(actions, "💾 Сохранить правку", self._desktop_save_edit).pack(side="left")
+        self._button(actions, "💾 Сохранить правку", self._desktop_save_edit).pack(side="left", padx=(0, 7))
+        self.comments_error_btn = self._button(
+            actions, "⚠ Подробнее об ошибке", self._show_selected_error
+        )
+        self.comments_error_btn.pack(side="left")
+        self.comments_error_btn.configure(state="disabled")
         self.comments_hint = self._label(actions, "Выберите пост в таблице.", muted=True, bg=BG)
         self.comments_hint.pack(side="right")
 
@@ -873,7 +878,13 @@ class NeuroCommentDesktop(tk.Tk):
             stats = load_queue_stats()
             signature = (
                 tuple(
-                    (str(x.get("key")), str(x.get("comment")), str(x.get("status")), bool(x.get("autopilot")))
+                    (
+                        str(x.get("key")),
+                        str(x.get("comment")),
+                        str(x.get("status")),
+                        bool(x.get("autopilot")),
+                        str(x.get("last_error") or ""),
+                    )
                     for x in items
                 ),
                 int(stats.get("queued_ai", 0)),
@@ -961,12 +972,76 @@ class NeuroCommentDesktop(tk.Tk):
             self._set_text_widget(self.comment_post_text, "", readonly=True)
             self._set_text_widget(self.comment_ai_text, "")
             self.comments_hint.configure(text="Выберите пост в таблице.")
+            if hasattr(self, "comments_error_btn"):
+                self.comments_error_btn.configure(state="disabled")
             return
         self._set_text_widget(self.comment_post_text, str(item.get("post_text") or ""), readonly=True)
         self._set_text_widget(self.comment_ai_text, str(item.get("comment") or ""))
+        error = str(item.get("last_error") or "").strip()
+        if hasattr(self, "comments_error_btn"):
+            self.comments_error_btn.configure(state="normal" if error else "disabled")
+        suffix = " • есть подробности ошибки" if error else ""
         self.comments_hint.configure(
-            text=f"{item.get('account', '')} • {item.get('chat_title', '')} • {item.get('status', 'Ожидает')}"
+            text=(
+                f"{item.get('account', '')} • {item.get('chat_title', '')} • "
+                f"{item.get('status', 'Ожидает')}{suffix}"
+            )
         )
+
+    def _show_selected_error(self):
+        key = self._selected_comment_key()
+        item = self.desktop_queue_by_key.get(key) if key else None
+        detail = str((item or {}).get("last_error") or "").strip()
+        if not detail:
+            return messagebox.showinfo(
+                "Подробности ошибки",
+                "Для выбранного комментария подробная ошибка не сохранена.",
+                parent=self,
+            )
+
+        win = tk.Toplevel(self)
+        win.title("NeuroComment — подробности ошибки Telegram")
+        win.configure(bg=BG)
+        win.geometry("760x420")
+        win.minsize(620, 320)
+        win.transient(self)
+
+        shell = tk.Frame(win, bg=BG, padx=16, pady=16)
+        shell.pack(fill="both", expand=True)
+
+        self._label(
+            shell,
+            str((item or {}).get("status") or "Ошибка Telegram"),
+            bold=True,
+            size=13,
+            bg=BG,
+        ).pack(anchor="w")
+
+        meta = (
+            f"Аккаунт: {(item or {}).get('account', '')}    "
+            f"Канал: {(item or {}).get('chat_title', '')}    "
+            f"Пост: {key}"
+        )
+        self._label(shell, meta, muted=True, bg=BG).pack(anchor="w", pady=(4, 10))
+
+        text = self._text(shell, height=14, wrap="word", font=("Consolas", 9))
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", detail)
+        text.configure(state="disabled")
+
+        buttons = tk.Frame(shell, bg=BG)
+        buttons.pack(fill="x", pady=(10, 0))
+
+        def copy_error():
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(detail)
+                self.update_idletasks()
+            except Exception:
+                pass
+
+        self._button(buttons, "Копировать", copy_error).pack(side="left")
+        self._button(buttons, "Закрыть", win.destroy).pack(side="right")
 
     def _ensure_desktop_action_ready(self):
         if not self._engine_is_running():
