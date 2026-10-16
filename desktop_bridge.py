@@ -29,6 +29,15 @@ def load_queue_stats() -> dict:
     return _queue().stats()
 
 
+def load_captcha_queue() -> list[dict]:
+    """Return active manual verification challenges for the Desktop UI."""
+    return _queue().list_captchas(active_only=True)
+
+
+def load_captcha(challenge_id: str) -> dict | None:
+    return _queue().get_captcha(challenge_id)
+
+
 def submit_desktop_command(action: str, key: str, *, comment: str | None = None) -> str:
     """Persist a Desktop action so it survives a GUI/engine crash."""
     return _queue().submit_command(action, key, comment)
@@ -141,6 +150,40 @@ class DesktopBridge:
 
     def list_ready_items(self, account: str | None = None):
         return [row_to_item(row) for row in self.queue.list_ready(account)]
+
+    def save_captcha(self, challenge_id: str, **kwargs) -> None:
+        self.queue.upsert_captcha(challenge_id, **kwargs)
+
+    def get_captcha(self, challenge_id: str) -> dict | None:
+        return self.queue.get_captcha(challenge_id)
+
+    def list_captchas(self, *, active_only: bool = True) -> list[dict]:
+        return self.queue.list_captchas(active_only=active_only)
+
+    def set_captcha_status(self, challenge_id: str, status: str, *, error: str = "") -> None:
+        self.queue.set_captcha_status(challenge_id, status, error=error)
+
+    def remove_captcha(self, challenge_id: str) -> None:
+        self.queue.remove_captcha(challenge_id)
+
+    def latest_pending_captcha(self, account: str, *, max_age_seconds: float = 60.0):
+        return self.queue.latest_pending_captcha(
+            account,
+            max_age_seconds=max_age_seconds,
+        )
+
+    def resolve_recent_captcha(
+        self,
+        account: str,
+        *,
+        chat_id: int | None = None,
+        max_age_seconds: float = 600.0,
+    ):
+        return self.queue.resolve_recent_captcha(
+            account,
+            chat_id=chat_id,
+            max_age_seconds=max_age_seconds,
+        )
 
     def stats(self) -> dict:
         return self.queue.stats()
