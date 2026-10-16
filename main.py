@@ -339,7 +339,7 @@ async def _retry_failed_autopilot_item(inst, item):
     """Retry a previously failed autopilot publication once, then discard it."""
     key = str(item.key)
     old_status = ""
-    row = bridge.queue.get(key) if getattr(bridge, "queue", None) is not None else None
+    row = bridge.get_record(key)
     if isinstance(row, dict):
         old_status = str(row.get("status") or "")
 
@@ -375,15 +375,15 @@ async def _retry_failed_autopilot_item(inst, item):
 
 
 async def _retry_existing_failed_autopilot(instances):
-    """Immediately retry persisted failed autopilot tasks once after startup."""
-    retry_tasks = []
+    """Retry persisted failed autopilot tasks once, sequentially."""
+    retry_items = []
 
     for inst in instances.values():
         if not inst.get("autopilot"):
             continue
 
         for item in bridge.list_ready_items(inst["name"]):
-            row = bridge.queue.get(str(item.key))
+            row = bridge.get_record(str(item.key))
             status = str((row or {}).get("status") or "").lower()
             if (
                 "ограничение telegram" in status
@@ -391,19 +391,24 @@ async def _retry_existing_failed_autopilot(instances):
                 or status.startswith("ошибка:")
             ):
                 _cancel_local_autopilot(item.key)
-                retry_tasks.append(
-                    asyncio.create_task(
-                        _retry_failed_autopilot_item(inst, item)
-                    )
-                )
+                retry_items.append((inst, item))
 
-    if retry_tasks:
+    if not retry_items:
+        return
+
+    print(
+        f"[AUTOPILOT-PC] Найдено старых проблемных задач: "
+        f"{len(retry_items)}. Повторяю публикацию по одной."
+    )
+
+    for index, (inst, item) in enumerate(retry_items, start=1):
         print(
-            f"[AUTOPILOT-PC] Найдено старых проблемных задач: "
-            f"{len(retry_tasks)}. Повторяю публикацию один раз."
+            f"[AUTOPILOT-PC] Повтор {index}/{len(retry_items)}: "
+            f"{item.key}"
         )
-        await asyncio.gather(*retry_tasks, return_exceptions=True)
-
+        await _retry_failed_autopilot_item(inst, item)
+        if index < len(retry_items):
+            await asyncio.sleep(1.5)
 
 async def run_account(account):
     """Подготовка одного аккаунта: клиент, монитор, обработчики, задачи."""
@@ -723,27 +728,27 @@ async def main():
     all_tasks.append(command_task)
     control_ready.set()
 
-    # Ready autopilot items also survive a restart. If BotPanel is unavailable,
-    # resume local autopilot scheduling from the durable queue.
+    # Old failed autopilot rows are retried once regardless of BotPanel.
+    # Success -> removed as published; failure -> also removed.
+    failed_keys = set()
+    for inst in instances.values():
+        if not inst.get("autopilot"):
+            continue
+        for item in bridge.list_ready_items(inst["name"]):
+            row = bridge.get_record(str(item.key))
+            status = str((row or {}).get("status") or "").lower()
+            if (
+                "ограничение telegram" in status
+                or "ошибка публикации" in status
+                or status.startswith("ошибка:")
+            ):
+                failed_keys.add(str(item.key))
+
+    await _retry_existing_failed_autopilot(instances)
+
+    # Ready non-failed autopilot items also survive a restart. If BotPanel is
+    # unavailable, resume their normal local autopilot timers.
     if panel is None:
-        failed_keys = set()
-        for inst in instances.values():
-            if not inst.get("autopilot"):
-                continue
-            for item in bridge.list_ready_items(inst["name"]):
-                row = bridge.queue.get(str(item.key))
-                status = str((row or {}).get("status") or "").lower()
-                if (
-                    "ограничение telegram" in status
-                    or "ошибка публикации" in status
-                    or status.startswith("ошибка:")
-                ):
-                    failed_keys.add(str(item.key))
-
-        # Old failed rows are retried immediately once. Success -> removed;
-        # failure -> also removed, so the queue cannot accumulate dead tasks.
-        await _retry_existing_failed_autopilot(instances)
-
         for inst in instances.values():
             if not inst.get("autopilot"):
                 continue
@@ -756,7 +761,6 @@ async def main():
                 scheduled += 1
             if scheduled:
                 print(f"[{inst['name']}][AUTOPILOT-PC] Восстановлено обычных задач: {scheduled}")
-
     try:
         print(f"✓ Аккаунтов в работе: {len(instances)}")
         print("✓ PC-панель комментариев активна.")
