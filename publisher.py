@@ -163,16 +163,23 @@ async def _join_discussion_and_retry(inst: dict, item, root):
         return True
     except RPCError as retry_exc:
         captcha_manager = inst.get("captcha_manager")
-        if (
-            captcha_manager is not None
-            and captcha_manager.has_recent_pending(max_age_seconds=30)
-        ):
-            detail = (
-                "После вступления в группу обсуждений обнаружена ручная "
-                "антиспам-проверка. Ответьте на неё во вкладке «Проверки»."
-            )
-            _remember_error(inst, detail, "CaptchaRequired")
-            return "CAPTCHA_REQUIRED"
+        if captcha_manager is not None:
+            if not captcha_manager.has_recent_pending(max_age_seconds=30):
+                # Some guard bots deliver the challenge a moment after Telegram
+                # rejects the first post-join send.
+                if type(retry_exc).__name__ in {
+                    "ChatWriteForbiddenError",
+                    "UserBannedInChannelError",
+                    "ChatRestrictedError",
+                }:
+                    await asyncio.sleep(2)
+            if captcha_manager.has_recent_pending(max_age_seconds=35):
+                detail = (
+                    "После вступления в группу обсуждений обнаружена ручная "
+                    "антиспам-проверка. Ответьте на неё во вкладке «Проверки»."
+                )
+                _remember_error(inst, detail, "CaptchaRequired")
+                return "CAPTCHA_REQUIRED"
 
         detail = _format_telegram_error(
             retry_exc,
