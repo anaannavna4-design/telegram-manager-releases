@@ -24,6 +24,7 @@ from desktop_bridge import (
     ack_desktop_command, retry_desktop_command,
 )
 from publisher import publish_comment
+from captcha_manager import CaptchaManager
 
 
 class QRWindow:
@@ -303,6 +304,16 @@ async def _local_autopublish_later(inst, key, delay):
             )
             await inst["store"].pop(key)
             bridge.remove(key)
+        elif result == "CAPTCHA_REQUIRED":
+            detail = str(
+                inst.get("last_publish_error")
+                or "Telegram требует ручную антиспам-проверку."
+            )
+            bridge.set_error(key, "Требуется CAPTCHA", detail)
+            print(
+                f"[{inst['name']}][AUTOPILOT-PC] Требуется ручная проверка: "
+                f"{key}"
+            )
         elif result == "PERMANENT_RESTRICTION":
             detail = str(inst.get("last_publish_error") or "Постоянный запрет Telegram.")
             print(
@@ -426,7 +437,41 @@ async def run_account(account):
         "store": store,
         "autopilot": bool(account.get("autopilot", False)),
         "tasks": [],
+        "captcha_manager": None,
     }
+
+    async def verification_resolved(_challenge):
+        waiting = []
+        for ready_item in bridge.list_ready_items(name):
+            record = bridge.get_record(str(ready_item.key)) or {}
+            if str(record.get("status") or "") == "Требуется CAPTCHA":
+                waiting.append(ready_item)
+
+        if not waiting:
+            return
+
+        if inst["autopilot"]:
+            for ready_item in waiting:
+                key = str(ready_item.key)
+                _cancel_local_autopilot(key)
+                local_autopilot_tasks[key] = asyncio.create_task(
+                    _local_autopublish_later(inst, key, 2)
+                )
+            print(
+                f"[{name}][VERIFY] Проверка пройдена — "
+                f"повторяю {len(waiting)} отложенных комментариев."
+            )
+        else:
+            for ready_item in waiting:
+                bridge.set_status(
+                    ready_item.key,
+                    "CAPTCHA пройдена — готов к публикации",
+                    clear_error=True,
+                )
+            print(
+                f"[{name}][VERIFY] Проверка пройдена — "
+                f"{len(waiting)} комментариев готовы к ручной публикации."
+            )
 
     # Restore comments that were already generated before a restart.
     restored_ready = bridge.list_ready_items(name)
@@ -519,6 +564,16 @@ async def run_account(account):
     ai_task = asyncio.create_task(ai_worker())
 
     await login_account(client, name)
+
+    captcha_manager = CaptchaManager(
+        name,
+        client,
+        bridge,
+        on_resolved=verification_resolved,
+    )
+    captcha_manager.register()
+    inst["captcha_manager"] = captcha_manager
+
     await mon.leave_banned_channels()
     await mon.resolve_missing_channels()
     mon.register_handlers(candidate)
@@ -587,6 +642,30 @@ async def desktop_command_loop(instances):
 
             item = None
             try:
+                if action.startswith("captcha_"):
+                    challenge = bridge.get_captcha(key)
+                    if challenge is None:
+                        if command_id:
+                            ack_desktop_command(command_id)
+                        continue
+
+                    account_name = str(challenge.get("account") or "")
+                    inst = instances.get(account_name)
+                    if inst is None or inst.get("captcha_manager") is None:
+                        raise RuntimeError(
+                            f"Telegram-аккаунт для проверки недоступен: {account_name}"
+                        )
+
+                    result = await inst["captcha_manager"].handle_command(
+                        action,
+                        key,
+                        command.get("comment"),
+                    )
+                    print(f"[{account_name}][VERIFY] {key}: {result}")
+                    if command_id:
+                        ack_desktop_command(command_id)
+                    continue
+
                 inst, item = await _find_pending(instances, key)
                 if item is None:
                     bridge.remove(key)
@@ -654,6 +733,16 @@ async def desktop_command_loop(instances):
                         print(
                             f"[{item.account}][PUBLISH] {key}: "
                             f"{detail.replace(chr(10), ' | ')}"
+                        )
+                    elif result == "CAPTCHA_REQUIRED":
+                        detail = str(
+                            inst.get("last_publish_error")
+                            or "Telegram требует ручную антиспам-проверку."
+                        )
+                        bridge.set_error(key, "Требуется CAPTCHA", detail)
+                        print(
+                            f"[{item.account}][VERIFY] Для {key} требуется "
+                            f"ручная проверка."
                         )
                     elif result == "PERMANENT_RESTRICTION":
                         detail = str(inst.get("last_publish_error") or "Постоянный запрет Telegram.")
@@ -770,7 +859,7 @@ async def main():
             f"обработка={stats.get('processing_ai', 0)}, "
             f"готово={stats.get('ready', 0)}, всего={stats.get('total', 0)}"
         )
-        print("NeuroComment 1.2.0 RC2 Desktop engine запущен.")
+        print("NeuroComment 1.2.0 RC3 Desktop engine запущен.")
 
         waiters = [
             asyncio.create_task(inst["client"].run_until_disconnected())
