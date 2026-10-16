@@ -539,6 +539,53 @@ class PersistentQueue:
             )
         return dict(row)
 
+    def has_active_captcha(self, account: str) -> bool:
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT 1
+                  FROM captcha_challenges
+                 WHERE account=?
+                   AND status NOT IN ('Пройдена', 'Удалена')
+                 LIMIT 1
+                """,
+                (str(account),),
+            ).fetchone()
+            return row is not None
+
+    def resolve_captchas_for_chat(
+        self,
+        account: str,
+        chat_id: int,
+    ) -> list[dict]:
+        """Resolve every active duplicate challenge for one account/chat."""
+        now = time.time()
+        with self._lock, self._connect() as con:
+            rows = con.execute(
+                """
+                SELECT *
+                  FROM captcha_challenges
+                 WHERE account=?
+                   AND chat_id=?
+                   AND status NOT IN ('Пройдена', 'Удалена')
+                 ORDER BY created_at
+                """,
+                (str(account), int(chat_id)),
+            ).fetchall()
+            if rows:
+                con.execute(
+                    """
+                    UPDATE captcha_challenges
+                       SET status='Пройдена', last_error='', updated_at=?
+                     WHERE account=?
+                       AND chat_id=?
+                       AND status NOT IN ('Пройдена', 'Удалена')
+                    """,
+                    (now, str(account), int(chat_id)),
+                )
+            return [dict(row) for row in rows]
+
+
     def submit_command(self, action: str, key: str, comment: str | None = None) -> str:
         command_id = uuid.uuid4().hex
         now = time.time()
