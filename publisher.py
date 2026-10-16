@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from telethon.errors import RPCError
-from telethon.tl.functions.channels import LeaveChannelRequest
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 from telethon.tl.functions.messages import GetDiscussionMessageRequest
 
 
@@ -75,6 +75,61 @@ async def _leave_source_after_permanent_restriction(inst: dict, item) -> str:
         )
 
 
+async def _join_discussion_and_retry(inst: dict, item, root):
+    """Join the linked discussion group and retry the comment exactly once."""
+    client = inst["client"]
+
+    try:
+        await client(JoinChannelRequest(root.peer_id))
+        print(
+            f"[{inst.get('name', '?')}][TELEGRAM] "
+            f"Вступил в группу обсуждений для {item.key}; повторяю публикацию."
+        )
+    except RPCError as join_exc:
+        join_name = type(join_exc).__name__
+        detail = _format_telegram_error(
+            join_exc,
+            stage="Вступление в группу обсуждений",
+        )
+        if join_name == "InviteRequestSentError":
+            detail += (
+                "\nTelegram принял заявку на вступление. "
+                "Комментарий можно будет отправить после одобрения заявки."
+            )
+        _remember_error(inst, detail, join_name)
+        return "PUBLISH_ERROR"
+    except Exception as join_exc:
+        detail = _format_telegram_error(
+            join_exc,
+            stage="Вступление в группу обсуждений",
+        )
+        _remember_error(inst, detail, type(join_exc).__name__)
+        return "PUBLISH_ERROR"
+
+    try:
+        await client.send_message(
+            entity=root.peer_id,
+            message=item.comment,
+            reply_to=root.id,
+        )
+        _clear_error(inst)
+        return True
+    except RPCError as retry_exc:
+        detail = _format_telegram_error(
+            retry_exc,
+            stage="Повторная отправка после вступления в обсуждение",
+        )
+        _remember_error(inst, detail, type(retry_exc).__name__)
+        return _result_for_rpc_error(retry_exc)
+    except Exception as retry_exc:
+        detail = _format_telegram_error(
+            retry_exc,
+            stage="Повторная отправка после вступления в обсуждение",
+        )
+        _remember_error(inst, detail, type(retry_exc).__name__)
+        return "PUBLISH_ERROR"
+
+
 def _result_for_rpc_error(exc: RPCError) -> str:
     if type(exc).__name__ in _LIMITED_ERROR_NAMES:
         return "ACCOUNT_LIMITED"
@@ -135,12 +190,18 @@ async def publish_comment(inst: dict, item):
         return True
 
     except RPCError as exc:
+        error_name = type(exc).__name__
+
+        # Telegram can allow reading a channel but require explicit membership
+        # in its linked discussion group before the first comment.
+        if error_name == "ChatGuestSendForbiddenError":
+            return await _join_discussion_and_retry(inst, item, root)
+
         detail = _format_telegram_error(
             exc,
             stage="Отправка комментария",
         )
 
-        error_name = type(exc).__name__
         if error_name in _AUTO_LEAVE_ERROR_NAMES:
             leave_note = await _leave_source_after_permanent_restriction(inst, item)
             detail = detail + "\n" + leave_note
