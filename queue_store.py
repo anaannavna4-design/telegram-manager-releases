@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -76,6 +77,27 @@ class PersistentQueue:
 
                 CREATE INDEX IF NOT EXISTS idx_commands_state_created
                     ON commands(state, created_at);
+
+                CREATE TABLE IF NOT EXISTS captcha_challenges (
+                    id TEXT PRIMARY KEY,
+                    account TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    chat_title TEXT NOT NULL DEFAULT '',
+                    sender_id INTEGER NOT NULL DEFAULT 0,
+                    sender_name TEXT NOT NULL DEFAULT '',
+                    sender_username TEXT NOT NULL DEFAULT '',
+                    challenge_text TEXT NOT NULL DEFAULT '',
+                    buttons_json TEXT NOT NULL DEFAULT '[]',
+                    media_path TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'Ожидает ответа',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_captcha_account_status
+                    ON captcha_challenges(account, status, created_at);
                 """
             )
 
@@ -323,6 +345,199 @@ class PersistentQueue:
                 result[stage] = n
                 result["total"] += n
         return result
+
+    def upsert_captcha(
+        self,
+        challenge_id: str,
+        *,
+        account: str,
+        chat_id: int,
+        message_id: int,
+        chat_title: str = "",
+        sender_id: int = 0,
+        sender_name: str = "",
+        sender_username: str = "",
+        challenge_text: str = "",
+        buttons: list | None = None,
+        media_path: str = "",
+        status: str = "Ожидает ответа",
+    ) -> None:
+        now = time.time()
+        buttons_json = json.dumps(buttons or [], ensure_ascii=False)
+        with self._lock, self._connect() as con:
+            old = con.execute(
+                "SELECT created_at FROM captcha_challenges WHERE id=?",
+                (str(challenge_id),),
+            ).fetchone()
+            created_at = float(old["created_at"]) if old else now
+            con.execute(
+                """
+                INSERT INTO captcha_challenges (
+                    id, account, chat_id, message_id, chat_title,
+                    sender_id, sender_name, sender_username,
+                    challenge_text, buttons_json, media_path,
+                    status, last_error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    account=excluded.account,
+                    chat_id=excluded.chat_id,
+                    message_id=excluded.message_id,
+                    chat_title=excluded.chat_title,
+                    sender_id=excluded.sender_id,
+                    sender_name=excluded.sender_name,
+                    sender_username=excluded.sender_username,
+                    challenge_text=excluded.challenge_text,
+                    buttons_json=excluded.buttons_json,
+                    media_path=excluded.media_path,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    str(challenge_id),
+                    str(account),
+                    int(chat_id or 0),
+                    int(message_id or 0),
+                    str(chat_title or ""),
+                    int(sender_id or 0),
+                    str(sender_name or ""),
+                    str(sender_username or ""),
+                    str(challenge_text or ""),
+                    buttons_json,
+                    str(media_path or ""),
+                    str(status or "Ожидает ответа"),
+                    created_at,
+                    now,
+                ),
+            )
+
+    def list_captchas(self, *, active_only: bool = True) -> list[dict]:
+        sql = "SELECT * FROM captcha_challenges"
+        args: tuple = ()
+        if active_only:
+            sql += " WHERE status NOT IN ('Пройдена', 'Удалена')"
+        sql += " ORDER BY created_at"
+        with self._connect() as con:
+            rows = con.execute(sql, args).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["buttons"] = json.loads(item.pop("buttons_json", "[]") or "[]")
+            except Exception:
+                item["buttons"] = []
+                item.pop("buttons_json", None)
+            result.append(item)
+        return result
+
+    def get_captcha(self, challenge_id: str) -> dict | None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT * FROM captcha_challenges WHERE id=?",
+                (str(challenge_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["buttons"] = json.loads(item.pop("buttons_json", "[]") or "[]")
+        except Exception:
+            item["buttons"] = []
+            item.pop("buttons_json", None)
+        return item
+
+    def set_captcha_status(
+        self,
+        challenge_id: str,
+        status: str,
+        *,
+        error: str = "",
+    ) -> None:
+        with self._lock, self._connect() as con:
+            con.execute(
+                """
+                UPDATE captcha_challenges
+                   SET status=?, last_error=?, updated_at=?
+                 WHERE id=?
+                """,
+                (
+                    str(status),
+                    str(error)[:4000],
+                    time.time(),
+                    str(challenge_id),
+                ),
+            )
+
+    def remove_captcha(self, challenge_id: str) -> None:
+        with self._lock, self._connect() as con:
+            con.execute(
+                "DELETE FROM captcha_challenges WHERE id=?",
+                (str(challenge_id),),
+            )
+
+    def latest_pending_captcha(
+        self,
+        account: str,
+        *,
+        max_age_seconds: float = 60.0,
+    ) -> dict | None:
+        cutoff = time.time() - max(1.0, float(max_age_seconds))
+        with self._connect() as con:
+            row = con.execute(
+                """
+                SELECT *
+                  FROM captcha_challenges
+                 WHERE account=?
+                   AND status NOT IN ('Пройдена', 'Удалена')
+                   AND created_at>=?
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                (str(account), cutoff),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["buttons"] = json.loads(item.pop("buttons_json", "[]") or "[]")
+        except Exception:
+            item["buttons"] = []
+            item.pop("buttons_json", None)
+        return item
+
+    def resolve_recent_captcha(
+        self,
+        account: str,
+        *,
+        chat_id: int | None = None,
+        max_age_seconds: float = 600.0,
+    ) -> dict | None:
+        cutoff = time.time() - max(1.0, float(max_age_seconds))
+        sql = """
+            SELECT *
+              FROM captcha_challenges
+             WHERE account=?
+               AND status NOT IN ('Пройдена', 'Удалена')
+               AND created_at>=?
+        """
+        args: list = [str(account), cutoff]
+        if chat_id is not None:
+            sql += " AND chat_id=?"
+            args.append(int(chat_id))
+        sql += " ORDER BY created_at DESC LIMIT 1"
+
+        with self._lock, self._connect() as con:
+            row = con.execute(sql, tuple(args)).fetchone()
+            if row is None:
+                return None
+            con.execute(
+                """
+                UPDATE captcha_challenges
+                   SET status='Пройдена', last_error='', updated_at=?
+                 WHERE id=?
+                """,
+                (time.time(), str(row["id"])),
+            )
+        return dict(row)
 
     def submit_command(self, action: str, key: str, comment: str | None = None) -> str:
         command_id = uuid.uuid4().hex
