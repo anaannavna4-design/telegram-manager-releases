@@ -978,9 +978,22 @@ class NeuroCommentDesktop(tk.Tk):
         self._set_text_widget(self.comment_post_text, str(item.get("post_text") or ""), readonly=True)
         self._set_text_widget(self.comment_ai_text, str(item.get("comment") or ""))
         error = str(item.get("last_error") or "").strip()
+        status = str(item.get("status") or "")
+        has_error_status = (
+            "ограничение telegram" in status.lower()
+            or "ошибка публикации" in status.lower()
+            or status.lower().startswith("ошибка:")
+        )
         if hasattr(self, "comments_error_btn"):
-            self.comments_error_btn.configure(state="normal" if error else "disabled")
-        suffix = " • есть подробности ошибки" if error else ""
+            self.comments_error_btn.configure(
+                state="normal" if (error or has_error_status) else "disabled"
+            )
+        if error:
+            suffix = " • есть подробности ошибки"
+        elif has_error_status:
+            suffix = " • подробности появятся после новой попытки"
+        else:
+            suffix = ""
         self.comments_hint.configure(
             text=(
                 f"{item.get('account', '')} • {item.get('chat_title', '')} • "
@@ -993,9 +1006,16 @@ class NeuroCommentDesktop(tk.Tk):
         item = self.desktop_queue_by_key.get(key) if key else None
         detail = str((item or {}).get("last_error") or "").strip()
         if not detail:
+            status = str((item or {}).get("status") or "")
             return messagebox.showinfo(
                 "Подробности ошибки",
-                "Для выбранного комментария подробная ошибка не сохранена.",
+                "Для этой строки сохранён только общий статус:\n\n"
+                f"{status or 'Ошибка Telegram'}\n\n"
+                "Это ограничение возникло до установки RC2, поэтому точный ответ "
+                "Telegram восстановить задним числом невозможно.\n\n"
+                "Нажмите «Опубликовать» ещё раз. Если Telegram снова отклонит "
+                "комментарий, RC2 сохранит точный тип ошибки, текст, RPC-код и "
+                "время ожидания, после чего они появятся здесь.",
                 parent=self,
             )
 
