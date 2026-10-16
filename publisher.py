@@ -63,16 +63,47 @@ def _clear_error(inst: dict) -> None:
     inst["last_publish_error_type"] = ""
 
 
-async def _leave_source_after_permanent_restriction(inst: dict, item) -> str:
-    client = inst["client"]
+async def _leave_peer_safely(client, peer, label: str) -> str:
     try:
-        await client(LeaveChannelRequest(item.chat_id))
-        return "Исходный канал автоматически покинут."
+        await client(LeaveChannelRequest(peer))
+        return f"{label}: успешно покинут."
     except Exception as exc:
-        return (
-            "Автовыход из исходного канала не удался: "
-            f"{type(exc).__name__}: {exc}"
+        name = type(exc).__name__
+        if name == "UserNotParticipantError":
+            return f"{label}: аккаунт уже не состоит в нём."
+        return f"{label}: выйти не удалось — {name}: {exc}"
+
+
+async def _cleanup_after_permanent_restriction(inst: dict, item, root) -> str:
+    client = inst["client"]
+    notes = []
+
+    # The actual ban normally belongs to the linked discussion group because
+    # that is where SendMessageRequest is sent.
+    try:
+        discussion_peer = root.peer_id
+    except Exception:
+        discussion_peer = None
+
+    if discussion_peer is not None:
+        notes.append(
+            await _leave_peer_safely(
+                client,
+                discussion_peer,
+                "Группа обсуждений",
+            )
         )
+
+    # Also leave the source broadcast channel if the account is subscribed.
+    notes.append(
+        await _leave_peer_safely(
+            client,
+            item.chat_id,
+            "Исходный канал",
+        )
+    )
+
+    return "\n".join(notes)
 
 
 async def _join_discussion_and_retry(inst: dict, item, root):
@@ -143,6 +174,7 @@ async def publish_comment(inst: dict, item):
       True               -> published
       ACCOUNT_LIMITED    -> Telegram/account/chat restriction; keep task
       PUBLISH_ERROR      -> other publish error; keep task
+      PERMANENT_RESTRICTION -> banned/write-forbidden; do not retry
     """
     client = inst["client"]
     _clear_error(inst)
@@ -203,8 +235,12 @@ async def publish_comment(inst: dict, item):
         )
 
         if error_name in _AUTO_LEAVE_ERROR_NAMES:
-            leave_note = await _leave_source_after_permanent_restriction(inst, item)
-            detail = detail + "\n" + leave_note
+            cleanup_note = await _cleanup_after_permanent_restriction(
+                inst, item, root
+            )
+            detail = detail + "\n" + cleanup_note
+            _remember_error(inst, detail, error_name)
+            return "PERMANENT_RESTRICTION"
 
         _remember_error(inst, detail, error_name)
         return _result_for_rpc_error(exc)
