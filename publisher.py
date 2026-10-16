@@ -202,7 +202,7 @@ def _result_for_rpc_error(exc: RPCError) -> str:
     return "PUBLISH_ERROR"
 
 
-async def publish_comment(inst: dict, item):
+async def _publish_comment_impl(inst: dict, item):
     """Publish a generated comment and keep the exact Telegram failure reason.
 
     Compatibility:
@@ -300,3 +300,25 @@ async def publish_comment(inst: dict, item):
         )
         _remember_error(inst, detail, type(exc).__name__)
         return "PUBLISH_ERROR"
+
+async def publish_comment(inst: dict, item):
+    """Serialize publishes per account and stop the queue at the first CAPTCHA."""
+    captcha_manager = inst.get("captcha_manager")
+
+    if captcha_manager is None:
+        return await _publish_comment_impl(inst, item)
+
+    async with captcha_manager.publish_lock:
+        # Once one anti-spam challenge exists, later comments must not touch
+        # Telegram until the user resolves that single challenge.
+        if captcha_manager.has_active_pending():
+            detail = (
+                "Публикация приостановлена: у этого Telegram-аккаунта уже "
+                "есть активная антиспам-проверка. Ответьте на неё во вкладке "
+                "«Проверки»; остальные комментарии будут продолжены после этого."
+            )
+            _remember_error(inst, detail, "CaptchaRequired")
+            return "CAPTCHA_REQUIRED"
+
+        return await _publish_comment_impl(inst, item)
+
