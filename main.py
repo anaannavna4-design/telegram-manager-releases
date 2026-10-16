@@ -301,6 +301,14 @@ async def _local_autopublish_later(inst, key, delay):
                 f"[{inst['name']}][AUTOPILOT-PC] Ошибка публикации: "
                 f"{detail.replace(chr(10), ' | ')}"
             )
+        elif result == "PERMANENT_RESTRICTION":
+            detail = str(inst.get("last_publish_error") or "Постоянный запрет Telegram.")
+            print(
+                f"[{inst['name']}][AUTOPILOT-PC] Постоянное ограничение: "
+                f"{detail.replace(chr(10), ' | ')}"
+            )
+            await inst["store"].pop(key)
+            bridge.remove(key)
         else:
             await inst["store"].pop(key)
             bridge.remove(key)
@@ -570,6 +578,14 @@ async def desktop_command_loop(instances):
                             f"[{item.account}][PUBLISH] {key}: "
                             f"{detail.replace(chr(10), ' | ')}"
                         )
+                    elif result == "PERMANENT_RESTRICTION":
+                        detail = str(inst.get("last_publish_error") or "Постоянный запрет Telegram.")
+                        print(
+                            f"[{item.account}][TELEGRAM] Постоянное ограничение {key}: "
+                            f"{detail.replace(chr(10), ' | ')}"
+                        )
+                        await inst["store"].pop(key)
+                        bridge.remove(key)
                     else:
                         await inst["store"].pop(key)
                         bridge.remove(key)
