@@ -265,11 +265,24 @@ class PersistentQueue:
                 ),
             )
 
-    def set_status(self, key: str, status: str) -> None:
+    def set_status(self, key: str, status: str, *, clear_error: bool = False) -> None:
+        with self._lock, self._connect() as con:
+            if clear_error:
+                con.execute(
+                    "UPDATE tasks SET status=?, last_error='', updated_at=? WHERE key=?",
+                    (str(status), time.time(), str(key)),
+                )
+            else:
+                con.execute(
+                    "UPDATE tasks SET status=?, updated_at=? WHERE key=?",
+                    (str(status), time.time(), str(key)),
+                )
+
+    def set_error(self, key: str, status: str, error: str) -> None:
         with self._lock, self._connect() as con:
             con.execute(
-                "UPDATE tasks SET status=?, updated_at=? WHERE key=?",
-                (str(status), time.time(), str(key)),
+                "UPDATE tasks SET status=?, last_error=?, updated_at=? WHERE key=?",
+                (str(status), str(error)[:4000], time.time(), str(key)),
             )
 
     def remove(self, key: str) -> None:
