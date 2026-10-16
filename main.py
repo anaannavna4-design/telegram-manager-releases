@@ -281,15 +281,26 @@ async def _local_autopublish_later(inst, key, delay):
         item = await inst["store"].get(key)
         if item is None or not inst.get("autopilot"):
             return
-        bridge.set_status(key, "Автопилот: публикация…")
+        bridge.set_status(key, "Автопилот: публикация…", clear_error=True)
         result = await publish_comment(inst, item)
         if result is True:
             await inst["store"].pop(key)
             bridge.remove(key)
             print(f"[{inst['name']}][AUTOPILOT-PC] Опубликовано: {key} — {item.chat_title}")
         elif result == "ACCOUNT_LIMITED":
-            bridge.set_status(key, "Ограничение Telegram")
-            print(f"[{inst['name']}][AUTOPILOT-PC] Ограничение Telegram, пост сохранён: {key}")
+            detail = str(inst.get("last_publish_error") or "Telegram отклонил отправку без дополнительного описания.")
+            bridge.set_error(key, "Ограничение Telegram", detail)
+            print(
+                f"[{inst['name']}][AUTOPILOT-PC] Ограничение Telegram: "
+                f"{detail.replace(chr(10), ' | ')}"
+            )
+        elif result == "PUBLISH_ERROR":
+            detail = str(inst.get("last_publish_error") or "Неизвестная ошибка публикации.")
+            bridge.set_error(key, "Ошибка публикации", detail)
+            print(
+                f"[{inst['name']}][AUTOPILOT-PC] Ошибка публикации: "
+                f"{detail.replace(chr(10), ' | ')}"
+            )
         else:
             await inst["store"].pop(key)
             bridge.remove(key)
@@ -297,8 +308,9 @@ async def _local_autopublish_later(inst, key, delay):
     except asyncio.CancelledError:
         pass
     except Exception as exc:
-        bridge.set_status(key, f"Ошибка: {type(exc).__name__}")
-        print(f"[{inst['name']}][AUTOPILOT-PC] Ошибка {key}: {type(exc).__name__}: {exc}")
+        detail = f"{type(exc).__name__}: {exc}"
+        bridge.set_error(key, f"Ошибка: {type(exc).__name__}", detail)
+        print(f"[{inst['name']}][AUTOPILOT-PC] Ошибка {key}: {detail}")
     finally:
         local_autopilot_tasks.pop(str(key), None)
 
@@ -542,10 +554,22 @@ async def desktop_command_loop(instances):
                     if edited_comment:
                         item.comment = edited_comment
                         bridge.upsert(item, autopilot=inst["autopilot"], status="Ожидает")
-                    bridge.set_status(key, "Публикация…")
+                    bridge.set_status(key, "Публикация…", clear_error=True)
                     result = await publish_comment(inst, item)
                     if result == "ACCOUNT_LIMITED":
-                        bridge.set_status(key, "Ограничение Telegram")
+                        detail = str(inst.get("last_publish_error") or "Telegram отклонил отправку без дополнительного описания.")
+                        bridge.set_error(key, "Ограничение Telegram", detail)
+                        print(
+                            f"[{item.account}][TELEGRAM] {key}: "
+                            f"{detail.replace(chr(10), ' | ')}"
+                        )
+                    elif result == "PUBLISH_ERROR":
+                        detail = str(inst.get("last_publish_error") or "Неизвестная ошибка публикации.")
+                        bridge.set_error(key, "Ошибка публикации", detail)
+                        print(
+                            f"[{item.account}][PUBLISH] {key}: "
+                            f"{detail.replace(chr(10), ' | ')}"
+                        )
                     else:
                         await inst["store"].pop(key)
                         bridge.remove(key)
