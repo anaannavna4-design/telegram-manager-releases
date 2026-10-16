@@ -172,6 +172,12 @@ class DesktopBridge:
             max_age_seconds=max_age_seconds,
         )
 
+    def has_active_captcha(self, account: str) -> bool:
+        return self.queue.has_active_captcha(account)
+
+    def resolve_captchas_for_chat(self, account: str, chat_id: int):
+        return self.queue.resolve_captchas_for_chat(account, chat_id)
+
     def resolve_recent_captcha(
         self,
         account: str,
