@@ -136,6 +136,9 @@ class DesktopBridge:
         row = self.queue.get(key)
         return row_to_item(row) if row else None
 
+    def get_record(self, key: str) -> dict | None:
+        return self.queue.get(key)
+
     def list_ready_items(self, account: str | None = None):
         return [row_to_item(row) for row in self.queue.list_ready(account)]
 
